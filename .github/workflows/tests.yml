@@ -39,12 +39,14 @@ jobs:
             prlimit --cpu=480 --as=17179869184 --nproc=256 --fsize=67108864 -- \
             bwrap --unshare-all --die-with-parent --new-session --clearenv \
               "${mounts[@]}" \
+              --ro-bind /etc/alternatives /etc/alternatives \
               --ro-bind "$GITHUB_WORKSPACE" /repo \
               --size 536870912 --tmpfs /tmp \
               --size 536870912 --tmpfs /scratch \
               --dir /scratch/home --dir /scratch/state \
               --dir /scratch/log --dir /scratch/signals \
               --proc /proc --dev /dev --chdir /repo \
+              --remount-ro / --remount-ro /dev \
               --setenv PATH /usr/bin:/bin \
               --setenv HOME /scratch/home \
               --setenv TMPDIR /tmp \
