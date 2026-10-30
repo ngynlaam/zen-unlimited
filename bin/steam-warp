@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# bin/steam-warp — mode-aware Steam launcher (standalone, sourced-lib reuse).
+#
+# Routes the Steam Client through WARP in both states without touching the
+# Zen setup (plugin, daemon, units, live copies are never modified here):
+#   proxy mode  (TCP 127.0.0.1:44444 reachable) -> Steam inherits
+#     http_proxy/https_proxy (+upper) pointing at the local WARP proxy and
+#     gets -tcp appended by default, so Store/client traffic goes TCP-via-proxy.
+#   tunnel mode (listener dead, system tunnel serves) -> all *PROXY unset
+#     (a stale :44444 would ECONNREFUSED everything) and steam runs as-is so
+#     UDP game/matchmaking/voice traffic flows through the tunnel.
+#
+# What this NEVER does: warp-cli mode/disconnect/connect, sudo, iptables,
+# system-wide proxy settings, /usr/share/applications writes.
+#
+# Usage: steam-warp [--dry-run|--print-env] [--tcp|--udp] [--] [args for steam]
+#   --dry-run    print env + command that would run, do not exec steam
+#   --print-env  same, but as eval-able `export ...` lines + the command
+#   --tcp        force -tcp even in tunnel mode
+#   --udp        drop the default -tcp even in proxy mode (UDP bypasses proxy)
+#   STEAM_BIN / STEAM_WARP_PROXY / STEAM_WARP_NO_PROXY env overrides (tests).
+set -u
+
+STEAM_WARP_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
+STEAM_LIB_DIR="$(cd "$STEAM_WARP_DIR/../lib" && pwd)"
+# Reuse the live Zen definitions (never copied): proxy_alive + defaults from
+# state.sh, mode_now (+30s mode_cache) from auto.sh. Guarded so a broken lib
+# degrades to the same cheap TCP probe instead of failing to launch Steam.
+# shellcheck disable=SC1091
+[ -f "$STEAM_LIB_DIR/state.sh" ] && source "$STEAM_LIB_DIR/state.sh" || true
+# shellcheck disable=SC1091
+[ -f "$STEAM_LIB_DIR/auto.sh" ] && source "$STEAM_LIB_DIR/auto.sh" || true
+
+STEAM_BIN="${STEAM_BIN:-steam}"
+STEAM_WARP_HOST="${PROXY_PROBE_HOST:-127.0.0.1}"
+STEAM_WARP_PORT="${PROXY_PROBE_PORT:-44444}"
+STEAM_WARP_PROXY="${STEAM_WARP_PROXY:-http://$STEAM_WARP_HOST:$STEAM_WARP_PORT}"
+STEAM_WARP_NO_PROXY="${STEAM_WARP_NO_PROXY:-localhost,127.0.0.1,::1}"
+
+steam_warp_usage() {
+  echo "usage: steam-warp [--dry-run|--print-env] [--tcp|--udp] [--] [args for steam]"
+  echo "  --dry-run    print env + command, do not exec steam"
+  echo "  --print-env  same, as eval-able export lines + command"
+  echo "  --tcp        force 'steam -tcp' even in tunnel mode"
+  echo "  --udp        drop the default -tcp in proxy mode (UDP bypasses the TCP-only proxy)"
+}
+
+# steam_warp_mode — proxy|tunnel. Prefers the shared mode_now (with its
+# MODE_TTL cache); falls back to one cheap TCP connect so Steam still
+# launches sanely when the libs fail to source.
+steam_warp_mode() {
+  local m=""
+  if command -v mode_now >/dev/null 2>&1; then
+    m=$(mode_now 2>/dev/null) || m=""
+  fi
+  case "$m" in
+    proxy|tunnel) printf '%s' "$m"; return 0;;
+  esac
+  if timeout 1 bash -c "cat < /dev/null > /dev/tcp/$STEAM_WARP_HOST/$STEAM_WARP_PORT" 2>/dev/null; then
+    printf 'proxy'
+  else
+    printf 'tunnel'
+  fi
+}
+
+DRY_RUN=0
+PRINT_ENV=0
+TCP_WANT="auto"   # auto | force | drop
+STEAM_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help|help) steam_warp_usage; exit 0;;
+    --dry-run) DRY_RUN=1; shift;;
+    --print-env) PRINT_ENV=1; DRY_RUN=1; shift;;
+    --tcp) TCP_WANT="force"; shift;;
+    --udp) TCP_WANT="drop"; shift;;
+    --) shift; while [ $# -gt 0 ]; do STEAM_ARGS+=("$1"); shift; done;;
+    *) STEAM_ARGS+=("$1"); shift;;
+  esac
+done
+
+MODE=$(steam_warp_mode)
+if [ "$MODE" = "proxy" ]; then
+  export http_proxy="$STEAM_WARP_PROXY" https_proxy="$STEAM_WARP_PROXY"
+  export HTTP_PROXY="$STEAM_WARP_PROXY" HTTPS_PROXY="$STEAM_WARP_PROXY"
+  export no_proxy="$STEAM_WARP_NO_PROXY" NO_PROXY="$STEAM_WARP_NO_PROXY"
+  ROUTE="local-proxy"
+  NOTE="Store-OK game-UDP-bypass"
+  ADD_TCP=1
+  [ "$TCP_WANT" = "drop" ] && ADD_TCP=0
+else
+  unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy no_proxy NO_PROXY
+  ROUTE="system-tunnel"
+  NOTE="all-via-WARP"
+  ADD_TCP=0
+  [ "$TCP_WANT" = "force" ] && ADD_TCP=1
+fi
+
+# Append -tcp once (never duplicate a user-supplied -tcp).
+if [ "$ADD_TCP" -eq 1 ]; then
+  _has_tcp=0
+  if [ "${#STEAM_ARGS[@]}" -gt 0 ]; then
+    for _a in "${STEAM_ARGS[@]}"; do
+      [ "$_a" = "-tcp" ] && _has_tcp=1
+    done
+  fi
+  if [ "$_has_tcp" -eq 0 ]; then
+    if [ "${#STEAM_ARGS[@]}" -gt 0 ]; then
+      STEAM_ARGS=(-tcp "${STEAM_ARGS[@]}")
+    else
+      STEAM_ARGS=(-tcp)
+    fi
+  fi
+  unset _has_tcp _a
+fi
+
+# _print_args — ' %q'-quoted args, or nothing when no args (avoids a stray '').
+_print_args() {
+  if [ "${#STEAM_ARGS[@]}" -gt 0 ]; then
+    printf ' %q' "${STEAM_ARGS[@]}"
+  fi
+}
+
+STATUS_LINE="mode=$MODE route=$ROUTE note=$NOTE"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  if [ "$PRINT_ENV" -eq 1 ]; then
+    if [ "$MODE" = "proxy" ]; then
+      # shellcheck disable=SC2086
+      printf 'export http_proxy=%q https_proxy=%q HTTP_PROXY=%q HTTPS_PROXY=%q no_proxy=%q NO_PROXY=%q\n' \
+        "$STEAM_WARP_PROXY" "$STEAM_WARP_PROXY" "$STEAM_WARP_PROXY" "$STEAM_WARP_PROXY" \
+        "$STEAM_WARP_NO_PROXY" "$STEAM_WARP_NO_PROXY"
+    else
+      echo "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy no_proxy NO_PROXY"
+    fi
+    printf 'exec: %s' "$STEAM_BIN"
+    _print_args
+    printf '\n# %s\n' "$STATUS_LINE"
+  else
+    echo "mode=$MODE route=$ROUTE"
+    echo "note=$NOTE"
+    if [ "$MODE" = "proxy" ]; then
+      echo "http_proxy=$STEAM_WARP_PROXY https_proxy=$STEAM_WARP_PROXY no_proxy=$STEAM_WARP_NO_PROXY"
+    else
+      echo "proxy-env=unset(all *PROXY cleared)"
+    fi
+    printf 'cmd: %s' "$STEAM_BIN"
+    _print_args
+    printf '\n'
+  fi
+  exit 0
+fi
+
+echo "steam-warp: $STATUS_LINE" >&2
+if [ "${#STEAM_ARGS[@]}" -gt 0 ]; then
+  exec "$STEAM_BIN" "${STEAM_ARGS[@]}"
+else
+  exec "$STEAM_BIN"
+fi

@@ -1,0 +1,12 @@
+# Local agent metadata and runtime state are not release inputs.
+.freebuff/
+.env
+.env.*
+!.env.example
+*.log
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+/signals/*
+!/signals/.keep

@@ -1,0 +1,12 @@
+[Unit]
+Description=Zen WARP rotation daemon (opt-in; interrupts WARP traffic)
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/warp-rotate/bin/warp-auto
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

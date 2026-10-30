@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# bin/zen — thin dispatch over lib/ modules (four subcommand Interfaces).
+#
+# Module: ZenWarp operations (policy daemon + rotate + report + launch + catch).
+# Interfaces (subcommands):
+#   auto   — policy daemon (ex warp-auto). Default with no args. Keeps all
+#            auto flags: [--once|--detect-test|--edge-test|--wait-test|--route-test].
+#   rotate — rotate Adapter (ex warp-rotate): warp-cli disconnect/connect
+#            cycle + egress probe. No flags, env-driven (PROXY, MAX_ATTEMPTS,
+#            DOWN_HOLD, READY_TRIES).
+#   report — read-only report (ex warp-report). No flags, env-driven
+#            (STATE_DIR, DB_FILE, DAYS).
+#   launch — mode-aware launcher (ex opencode2-warp): exec OpenCode with
+#            proxy or system-tunnel routing for the selected mode.
+#   catch  — live catcher (Observer): bundles transient transport resets.
+#            No flags for the watch loop; [--once|--self-test] for scans.
+# Seam: state files under $STATE_DIR + signals log (auto <-> report);
+#   internal rotate call (auto -> rotate, no external process).
+# Adapter: do_rotate calls zen_rotate_main when WARP_ROTATE is the
+#   internal marker (default); a custom WARP_ROTATE path still execs.
+#
+# Bodies live in lib/: state.sh (shared state + helpers), auto.sh,
+# rotate.sh, report.sh, launch.sh, catch.sh. This file defines usage, sources
+# them in order, and dispatches. No policy/state-format change.
+set -u
+
+zen_usage() {
+  echo "usage: zen <command> [args]"
+  echo "  auto [--once|--detect-test|--edge-test|--wait-test|--route-test]  policy daemon (default, no args = auto)"
+  echo "  rotate                                               reset WARP egress session"
+  echo "  report                                               read-only quota/edge analysis"
+  echo "  launch [args...]                                     launch OpenCode with mode-aware WARP routing"
+  echo "  catch [--once|--self-test]                           bundle transient transport resets"
+  echo "  help, -h, --help                                     show this help"
+}
+
+
+# Module sources: lib/ holds the six sourced modules; this file only
+# defines usage, sources them in order, and dispatches. state.sh first
+# (shared state + helpers), then the five subcommand modules.
+ZEN_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}/../lib" && pwd)"
+source "$ZEN_LIB_DIR/state.sh"
+source "$ZEN_LIB_DIR/auto.sh"
+source "$ZEN_LIB_DIR/rotate.sh"
+source "$ZEN_LIB_DIR/report.sh"
+source "$ZEN_LIB_DIR/launch.sh"
+source "$ZEN_LIB_DIR/catch.sh"
+
+# Dispatch lives BELOW every definition (bash runs top to bottom;
+# a dispatch block above a definition calls a missing function).
+ZEN_CMD="${1:-auto}"
+case "$ZEN_CMD" in
+  help|-h|--help) zen_usage; exit 0;;
+  auto)
+    shift || true
+    zen_auto_main "$@"
+    ;;
+  rotate)
+    shift || true
+    zen_rotate_main "$@"; exit $?;;
+  report)
+    shift || true
+    zen_report_main "$@"; exit $?;;
+  launch)
+    shift || true
+    zen_launch_main "$@"; exit $?;;
+  catch)
+    shift || true
+    zen_catch_main "$@"; exit $?;;
+  -*)
+    zen_auto_main "$@"
+    ;;
+  *) echo "unknown command: $ZEN_CMD"; zen_usage; exit 2;;
+esac

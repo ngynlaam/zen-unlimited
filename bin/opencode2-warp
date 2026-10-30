@@ -1,0 +1,3 @@
+#!/bin/sh
+# Thin rollback wrapper: delegates to bin/zen subcommand.
+exec "${0%/*}/zen" launch "$@"
